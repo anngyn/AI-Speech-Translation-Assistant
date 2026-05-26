@@ -107,6 +107,56 @@ sequentially, not in real-time.
 - **Bedrock over direct Anthropic API** — AWS credential chain already in place at OnPoint;
   Bedrock Claude Haiku is cheaper at scale than Anthropic direct for high-volume sessions.
 
+## End-User Value
+
+A town hall with 200 employees and two languages normally needs a hired interpreter, a separate audio feed, and coordination overhead. This tool removes all three:
+
+- Any employee opens one URL — no install, no account
+- The interpreter panel appears beside the speaker transcript in real time
+- Language direction switches mid-session without stopping (useful when Q&A flips between EN and VI)
+- File upload lets a team re-run the pipeline on a recorded meeting after the fact
+
+The $1.04/2h cost means a daily stand-up costs less than a cup of coffee.
+
+## Why This Approach Over the Obvious Baseline
+
+**Obvious baseline:** Send the full audio file to Whisper after the meeting ends, then translate the full transcript.
+
+**Why streaming chunks instead:**
+
+| | Batch after meeting | This approach |
+|---|---|---|
+| Latency | Minutes after session | 3–5s per chunk |
+| Useful during live meeting | No | Yes |
+| Cost | Same | Same |
+| Complexity | Lower | Higher |
+
+The only reason to pick batch is simplicity. For a live interpreter tool, batch is not a valid option — the user needs the translation while the speaker is still talking.
+
+**Trade-offs I made consciously:**
+
+- **Fixed 5s chunks over VAD** — Voice Activity Detection would give cleaner boundaries but requires a WebRTC VAD library in the browser and a pipeline change. Fixed chunks ship faster and work well enough.
+- **Bedrock over direct Anthropic API** — Bedrock adds ~50ms latency due to the AWS call chain, but uses the credential infrastructure OnPoint already has. Switching is a one-line env var change.
+- **Regex entity extractor over NER model** — A fine-tuned NER model would be more accurate but requires training data and a model server. Regex is instant and covers the high-value cases (amounts, dates, known org names).
+- **No diarization** — Speaker separation (who said what) would improve quality but adds ~500ms latency and a third API call per chunk. Out of scope for POC.
+
+## Scalability
+
+**Current architecture:** Single uvicorn process, sessions in memory (`app.state.sessions`).
+
+**What breaks at scale:**
+
+| Bottleneck | Breaks at | Fix |
+|---|---|---|
+| In-memory sessions | ~100 concurrent sessions | Move to Redis |
+| Single uvicorn worker | ~50 concurrent WS connections | `uvicorn --workers N` or Gunicorn |
+| OpenAI Whisper rate limit | 50 req/min (free tier) | Batch org key or self-host whisper |
+| Bedrock throughput | Depends on AWS account quota | Request quota increase |
+
+**For 10 concurrent sessions (realistic for OnPoint):** current architecture handles it without changes.
+
+**For 100+ concurrent sessions:** add a Redis session store, run behind a load balancer with sticky sessions, and upgrade to a Bedrock provisioned throughput tier.
+
 ## Limitations
 
 - Single speaker at a time — no diarization.
@@ -148,27 +198,42 @@ sequentially, not in real-time.
 
 ## Agentic Coding Journey
 
-This project was built entirely through Claude Code (Anthropic's CLI agent) running inside
-an agent harness (`AGENTS.md`, `docs/HARNESS.md`). The harness forces every task through:
+This project was built entirely through **Claude Code** (Anthropic's agentic CLI) running inside a structured agent harness. Here is what that actually means in practice.
 
-1. **Feature intake** — classify work type (spec slice, change request, etc.)
-2. **Story packet** — define validation proof before writing code
-3. **Test matrix** — behavior-to-proof control panel updated each story
-4. **Decision records** — architecture tradeoffs captured for future agent turns
+### The Harness
 
-Techniques used during development:
+A bare repo gives an AI agent no context: no product intent, no risk boundaries, no validation expectations. The harness (`AGENTS.md`, `docs/HARNESS.md`, `docs/FEATURE_INTAKE.md`) forces every task through a gate:
 
-- **Protocol injection** — `InterpretSession` receives `AudioConverter`, `SpeechToTextClient`,
-  and `TranslationClient` as injected protocols. No direct provider imports in the application
-  layer. This let the agent write unit tests with fake clients before real API calls existed.
-- **Structured error returns** — all provider boundaries return typed result objects
-  (`ChunkResult`, `TranslationResult`) with an `error` field instead of raising. The agent
-  could test error paths without mocking exceptions.
-- **Incremental story delivery** — each story (US-001 through US-006) was implemented in
-  isolation with its own validation proof before the next was started.
-- **Harness growth from friction** — when the evaluate script did not support manifest-based
-  datasets, the agent extended it with `--manifest` and `--limit` flags rather than patching
-  around the gap.
+```
+prompt → feature intake → risk classification → story packet → test matrix → code
+```
 
-The agent made all architecture decisions (chunk size, Whisper prompt strategy, Bedrock over
-direct API, entity memory shape) by reading `docs/decisions/` records left by earlier turns.
+This is not prompt chaining in the traditional sense. It is a **persistent context scaffold** — decision records and story packets written by earlier agent turns are read by later turns, so the agent inherits its own reasoning without relying on chat history.
+
+### Techniques Used
+
+**1. Protocol injection (dependency inversion for testability)**
+
+`InterpretSession` receives `AudioConverter`, `SpeechToTextClient`, and `TranslationClient` as injected protocols, not concrete imports. The agent wrote fake implementations (`FakeWhisperClient`, `FakeClaudeClient`) and passed all unit tests before a single real API call was made. When Whisper returned `TranscriptionSegment` objects instead of dicts, only `whisper_client.py` needed changing — zero cascade.
+
+**2. Structured error returns over exceptions**
+
+All provider boundary functions return typed result objects (`ChunkResult`, `TranslationResult`) with an `error: str | None` field. The agent never had to mock `raise` paths in tests. This also means a Bedrock timeout surfaces as a displayable message in the browser instead of a 500.
+
+**3. Decision records as agent memory**
+
+Every architecture choice was captured in `docs/decisions/` before implementation. When a later agent turn asked "why Bedrock over direct Anthropic API?", the answer was in `0010-bedrock-claude-access-path.md`. The agent read it and did not re-argue the decision.
+
+**4. Test matrix as proof contract**
+
+`docs/TEST_MATRIX.md` is updated after each story. It tracks which behaviors have unit proof, integration proof, and E2E proof. The agent used it to decide what to test next rather than guessing.
+
+**5. Live debugging loop**
+
+The agent ran the server, observed errors in the browser console (`audio_conversion_failed`, `TranscriptionSegment has no attribute 'get'`, WebM header prepend issue), diagnosed root causes from stack traces, and patched — without being explicitly told what was wrong. This is the main productivity gain over writing code without an agent: the diagnosis → fix → verify loop collapsed from minutes to seconds.
+
+### What I Would Do Differently
+
+- **Give the agent a real spec earlier.** The harness is designed for spec-first development, but I started with implementation. Two turns of rework came from missing product decisions that should have been decisions first.
+- **Use the agent for evaluation harness setup.** The evaluate script exists but was not fully wired into a CI loop. A second agent pass would close that gap.
+- **Multi-agent for parallel work.** Whisper integration and Bedrock integration were sequential. They could have been two parallel agent tasks with a merge step — standard multi-agent pattern that Claude Code supports via subagents.
