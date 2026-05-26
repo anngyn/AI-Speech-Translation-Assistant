@@ -1,0 +1,11 @@
+boto3>=1.35.0
+datasets>=4.1.1
+fastapi>=0.115.0
+jiwer>=3.0.5
+openai>=1.55.0
+pydub>=0.25.1
+pytest>=8.3.0
+python-dotenv>=1.0.1
+python-multipart>=0.0.12
+soundfile>=0.13.1
+uvicorn[standard]>=0.32.0

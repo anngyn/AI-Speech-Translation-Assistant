@@ -1,0 +1,21 @@
+# Personal files
+*.pdf
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Harness durable layer — each project instance generates its own data.
+harness.db
+harness.db-wal
+harness.db-shm
+
+# Rust build output for harness tooling.
+target/
+dist/
+
+# Downloaded Harness CLI binary for installed project instances.
+scripts/bin/harness-cli
