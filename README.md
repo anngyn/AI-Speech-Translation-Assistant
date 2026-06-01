@@ -3,6 +3,10 @@
 Near-real-time EN↔VI interpretation for internal town halls and all-hands meetings.
 Browser-based — no specialist hardware, no interpreter hire.
 
+## Demo
+
+[Watch the demo video](demo.mp4)
+
 ## What It Does
 
 User opens one URL, clicks **Start**, and sees a dual-panel view:
